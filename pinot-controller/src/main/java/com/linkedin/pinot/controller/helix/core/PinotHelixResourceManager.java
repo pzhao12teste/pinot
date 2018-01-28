@@ -56,6 +56,7 @@ import com.linkedin.pinot.controller.ControllerConf;
 import com.linkedin.pinot.controller.api.pojos.Instance;
 import com.linkedin.pinot.controller.helix.core.PinotResourceManagerResponse.ResponseStatus;
 import com.linkedin.pinot.controller.helix.core.realtime.PinotLLCRealtimeSegmentManager;
+import com.linkedin.pinot.controller.helix.core.rebalancer.ReplicaGroupRebalanceStrategy;
 import com.linkedin.pinot.controller.helix.core.sharding.SegmentAssignmentStrategy;
 import com.linkedin.pinot.controller.helix.core.sharding.SegmentAssignmentStrategyEnum;
 import com.linkedin.pinot.controller.helix.core.sharding.SegmentAssignmentStrategyFactory;
@@ -64,6 +65,7 @@ import com.linkedin.pinot.controller.helix.core.util.ZKMetadataUtils;
 import com.linkedin.pinot.controller.helix.starter.HelixConfig;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -77,6 +79,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.AccessOption;
 import org.apache.helix.ClusterMessagingService;
 import org.apache.helix.Criteria;
@@ -97,6 +100,7 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.LiveInstance;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.zookeeper.data.Stat;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -2232,6 +2236,158 @@ public class PinotHelixResourceManager {
       // Nothing to do, let the user know via an exception (ideally a status, but...)
       throw new RuntimeException("No LLC partitions in ONLINE state in this table");
     }
+  }
+
+  public JSONObject rebalanceReplicaGroupTable(String tableName, CommonConstants.Helix.TableType tableType,
+      int numInstancesPerPartition, int numReplicaGroup, boolean dryRun) throws Exception {
+    LOGGER.info(StringUtils.joinWith(",", tableName, tableType, numReplicaGroup, numInstancesPerPartition, dryRun));
+    System.out.println(
+        StringUtils.joinWith(",", tableName, tableType, numReplicaGroup, numInstancesPerPartition, dryRun));
+
+    PartitionToReplicaGroupMappingZKMetadata oldReplicaGroupMapping =
+        ZKMetadataProvider.getPartitionToReplicaGroupMappingZKMedata(_propertyStore, tableName);
+
+    List<String> oldServerList = oldReplicaGroupMapping.getAllInstances();
+    List<String> newServerList = getServerInstancesForTable(tableName, tableType);
+
+    // Compute added and removed servers
+    List<String> addedServers = new ArrayList<>();
+    List<String> removedServers = new ArrayList<>();
+
+    for (String server : oldServerList) {
+      if (!newServerList.contains(server)) {
+        removedServers.add(server);
+      }
+    }
+    for (String server : newServerList) {
+      if (!oldServerList.contains(server)) {
+        addedServers.add(server);
+      }
+    }
+
+    System.out.println("Added servers: " + Arrays.toString(addedServers.toArray()));
+    System.out.println("Removed servers: " + Arrays.toString(removedServers.toArray()));
+    System.out.println("Old servers: " + Arrays.toString(oldServerList.toArray()));
+    System.out.println("New servers: " + Arrays.toString(newServerList.toArray()));
+
+    // Fetch the original replica group strategy configs
+    TableConfig tableConfig = getTableConfig(tableName, tableType);
+    ReplicaGroupStrategyConfig replicaGroupConfig = tableConfig.getValidationConfig().getReplicaGroupStrategyConfig();
+    int oldNumReplicaGroup = tableConfig.getValidationConfig().getReplicationNumber();
+    int oldNumInstancesPerPartition = replicaGroupConfig.getNumInstancesPerPartition();
+
+    // Perform the basic validation
+    if ((numReplicaGroup <= 0 || numInstancesPerPartition <= 0) && (numReplicaGroup * numInstancesPerPartition
+        <= newServerList.size())) {
+      // Unsupported config
+      LOGGER.info("Unsupported config");
+      throw new UnsupportedOperationException(
+          "Unsupported config (numReplicaGroup: " + numReplicaGroup + ", " + "numInstancesPerPartition: "
+              + numInstancesPerPartition + ")");
+    }
+
+    String tableNameWithType = TableNameBuilder.forType(tableType).tableNameWithType(tableName);
+    IdealState idealState = _helixAdmin.getResourceIdealState(_helixClusterName, tableNameWithType);
+    ReplicaGroupRebalanceStrategy replicaGroupRebalanceStrategy = new ReplicaGroupRebalanceStrategy();
+    PartitionToReplicaGroupMappingZKMetadata newReplicaGroupMapping = null;
+    Map<String, Map<String, String>> newMapping = null;
+
+    if (oldNumInstancesPerPartition == numInstancesPerPartition && oldNumReplicaGroup == numReplicaGroup) {
+      if (addedServers.size() == 0 && removedServers.size() == 0) {
+        // No Change
+        LOGGER.info("no change");
+        System.out.println("no change");
+      } else if (addedServers.size() == removedServers.size()) {
+        // Replace instance
+        LOGGER.info("instance replacement");
+        System.out.println("instance replacement");
+        newReplicaGroupMapping =
+            replicaGroupRebalanceStrategy.computeNewReplicaGroupMapping(oldReplicaGroupMapping, addedServers,
+                removedServers, 1, numReplicaGroup, numInstancesPerPartition);
+        newMapping =
+            replicaGroupRebalanceStrategy.computeReplaceInstanceNewMapping(idealState.getRecord().getMapFields(),
+                addedServers, removedServers);
+      }
+    } else if (oldNumInstancesPerPartition == numInstancesPerPartition && oldNumReplicaGroup != numReplicaGroup) {
+      // Change in replica group number
+
+      if (oldNumInstancesPerPartition > numReplicaGroup && addedServers.size() == 0 && removedServers.size() > 0
+          && removedServers.size() % numInstancesPerPartition == 0) {
+        // Removing replica groups
+        LOGGER.info("Removing replica groups");
+        System.out.println("Removing replica groups");
+      } else if (oldNumInstancesPerPartition < numReplicaGroup && addedServers.size() > 0 && removedServers.size() == 0
+          && addedServers.size() % numInstancesPerPartition == 0) {
+        // Adding replica group
+        LOGGER.info("Adding replica groups");
+        System.out.println("Adding replica groups");
+
+        newReplicaGroupMapping =
+            replicaGroupRebalanceStrategy.computeNewReplicaGroupMapping(oldReplicaGroupMapping, addedServers,
+                removedServers, 1, numReplicaGroup, numInstancesPerPartition);
+        newMapping =
+            replicaGroupRebalanceStrategy.computeReplaceInstanceNewMapping(idealState.getRecord().getMapFields(),
+                addedServers, removedServers);
+
+      }
+    } else if (oldNumInstancesPerPartition != numInstancesPerPartition && oldNumReplicaGroup == numReplicaGroup) {
+      // Change in instances per partition
+      if (oldNumInstancesPerPartition < numInstancesPerPartition && removedServers.size() == 0
+          && addedServers.size() > 0 && addedServers.size() % numReplicaGroup == 0) {
+        // Adding servers to replica group
+        LOGGER.info("Adding servers to replica group");
+        System.out.println("Adding servers to replica group");
+      } else if (oldNumInstancesPerPartition > numInstancesPerPartition && removedServers.size() > 0
+          && addedServers.size() == 0 && removedServers.size() % numReplicaGroup == 0) {
+        // Removing servers from replica group
+        LOGGER.info("Removing servers from replica group");
+        System.out.println("Removing servers from replica group");
+      }
+    }
+
+    if (newMapping == null || newReplicaGroupMapping == null) {
+      // Unsupported Config
+      LOGGER.info("Unsupported config");
+      System.out.println("Unsupported config");
+    }
+
+    // Update table config
+    replicaGroupConfig.setNumInstancesPerPartition(numInstancesPerPartition);
+    tableConfig.getValidationConfig().setReplication(Integer.toString(numReplicaGroup));
+
+    JSONObject result = new JSONObject();
+    result.put("tableConfig", TableConfig.toJSONConfig(tableConfig));
+    result.put("replicaGroupMapping", newReplicaGroupMapping.toZNRecord().getListFields());
+    result.put("idealState", newMapping);
+
+    // If dry run, do not update ideal state
+    if (!dryRun) {
+      // Write table config
+      ZKMetadataProvider.setOfflineTableConfig(_propertyStore, tableNameWithType, TableConfig.toZnRecord(tableConfig));
+      // Write new Replica group mapping
+      ZKMetadataProvider.setInstancePartitionAssignmentFromPropertyStore(_propertyStore, newReplicaGroupMapping);
+      // Update IdealState
+      updateIdealStateForReplicaGroupRebalancer(tableNameWithType, numReplicaGroup, newMapping);
+    }
+
+    return result;
+  }
+
+  private void updateIdealStateForReplicaGroupRebalancer(final String tableNameWithType, final int numReplicaGroup,
+      final Map<String, Map<String, String>> newMapping) {
+    HelixHelper.updateIdealState(_helixZkManager, tableNameWithType, new Function<IdealState, IdealState>() {
+      @Nullable
+      @Override
+      public IdealState apply(@Nullable IdealState idealState) {
+        // Update idealState
+        for (Map.Entry<String, Map<String, String>> entry : newMapping.entrySet()) {
+          idealState.setInstanceStateMap(entry.getKey(), entry.getValue());
+        }
+        idealState.setReplicas(Integer.toString(numReplicaGroup));
+
+        return idealState;
+      }
+    }, RetryPolicies.exponentialBackoffRetryPolicy(5, 1000, 2.0f));
   }
 
   /**

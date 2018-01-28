@@ -17,6 +17,7 @@
 package com.linkedin.pinot.controller.api.resources;
 
 import com.google.common.base.Preconditions;
+import com.linkedin.pinot.common.config.ReplicaGroupStrategyConfig;
 import com.linkedin.pinot.common.config.SegmentsValidationAndRetentionConfig;
 import com.linkedin.pinot.common.config.TableConfig;
 import com.linkedin.pinot.common.config.TableNameBuilder;
@@ -47,6 +48,7 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.ZNRecord;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -394,6 +396,34 @@ public class PinotTableRestletResource {
       return _pinotHelixResourceManager.rebalanceTable(tableName, dryRun, CommonConstants.Helix.TableType.REALTIME);
     } else {
       throw new ControllerApplicationException(LOGGER, "Illegal table type " + tableType, Response.Status.BAD_REQUEST);
+    }
+  }
+
+
+  @POST
+  @Produces(MediaType.APPLICATION_JSON)
+  @Path("/tables/{tableName}/rebalanceReplicaGroupTable")
+  @ApiOperation(value = "Rebalances segments of a table across servers with replica group assignment",
+      notes = "Rebalances segments of a table across servers with replica group assignment")
+  public String rebalanceReplicaGroup(
+      @ApiParam(value = "Name of the table to rebalance", required = true) @PathParam("tableName") String tableName,
+      @ApiParam(value = "offline|realtime", required = true) @QueryParam("type") String tableType,
+      @ApiParam(value = "number of replica groups", required = true) @QueryParam("numReplicaGroup") Integer numReplicaGroup,
+      @ApiParam(value = "number of instances per partition", required = true) @QueryParam("numInstancesPerPartition") Integer numInstancesPerPartition,
+      @ApiParam(value = "true|false", required = true, defaultValue = "true") @QueryParam("dryrun") Boolean dryRun
+  ) {
+    try {
+      LOGGER.info(StringUtils.joinWith(",", tableName, tableType,numReplicaGroup,numInstancesPerPartition,dryRun));
+      // Get current server instances
+      if (tableType.equalsIgnoreCase(CommonConstants.Helix.TableType.OFFLINE.name())) {
+        // Create replica group segment assignment strategy object
+        JSONObject result = _pinotHelixResourceManager.rebalanceReplicaGroupTable(tableName, CommonConstants.Helix.TableType.OFFLINE, numInstancesPerPartition, numReplicaGroup, dryRun);
+        return result.toString();
+      } else {
+        throw new ControllerApplicationException(LOGGER, "Illegal table type " + tableType, Response.Status.BAD_REQUEST);
+      }
+    } catch (Exception e) {
+      throw new ControllerApplicationException(LOGGER, "Failed to rebalance ", Response.Status.BAD_REQUEST);
     }
   }
 }

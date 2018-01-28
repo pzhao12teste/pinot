@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.linkedin.pinot.controller.helix.sharding;
+package com.linkedin.pinot.controller.helix.core.sharding;
 
 import com.linkedin.pinot.common.config.ColumnPartitionConfig;
 import com.linkedin.pinot.common.config.IndexingConfig;
@@ -23,6 +23,7 @@ import com.linkedin.pinot.common.config.TableConfig;
 import com.linkedin.pinot.common.config.TableNameBuilder;
 import com.linkedin.pinot.common.metadata.ZKMetadataProvider;
 import com.linkedin.pinot.common.metadata.segment.PartitionToReplicaGroupMappingZKMetadata;
+import com.linkedin.pinot.common.segment.SegmentMetadata;
 import com.linkedin.pinot.common.utils.CommonConstants;
 import com.linkedin.pinot.common.utils.ZkStarter;
 import com.linkedin.pinot.controller.helix.ControllerRequestBuilderUtil;
@@ -230,7 +231,10 @@ public class SegmentAssignmentStrategyTest {
     Set<String> segments = new HashSet<>();
     for (int i = 0; i < numSegments; ++i) {
       String segmentName = "segment" + i;
-      addOneSegmentWithPartitionInfo(TABLE_NAME_TABLE_LEVEL_REPLICA_GROUP, segmentName, null, 0);
+      SegmentMetadata segmentMetadata =
+          SegmentMetadataMockUtils.mockSegmentMetadataWithPartitionInfo(TABLE_NAME_TABLE_LEVEL_REPLICA_GROUP,
+              segmentName, null, 0);
+      _pinotHelixResourceManager.addNewSegment(segmentMetadata, "downloadUrl");
       segments.add(segmentName);
     }
 
@@ -314,8 +318,10 @@ public class SegmentAssignmentStrategyTest {
     for (int i = 0; i < numSegments; ++i) {
       int partitionNumber = i % totalPartitionNumber;
       String segmentName = "segment" + i;
-      addOneSegmentWithPartitionInfo(TABLE_NAME_PARTITION_LEVEL_REPLICA_GROUP, segmentName, PARTITION_COLUMN,
-          partitionNumber);
+      SegmentMetadata segmentMetadata =
+          SegmentMetadataMockUtils.mockSegmentMetadataWithPartitionInfo(TABLE_NAME_PARTITION_LEVEL_REPLICA_GROUP,
+              segmentName, PARTITION_COLUMN, partitionNumber);
+      _pinotHelixResourceManager.addNewSegment(segmentMetadata, "downloadUrl");
       if (!partitionToSegment.containsKey(partitionNumber)) {
         partitionToSegment.put(partitionNumber, new HashSet<String>());
       }
@@ -384,22 +390,5 @@ public class SegmentAssignmentStrategyTest {
       }
     }
     return serverToSegments;
-  }
-
-  private void addOneSegmentWithPartitionInfo(String tableName, String segmentName, String columnName,
-      int partitionNumber) {
-    ColumnMetadata columnMetadata = mock(ColumnMetadata.class);
-    List<IntRange> partitionRanges = new ArrayList<>();
-    partitionRanges.add(new IntRange(partitionNumber));
-    when(columnMetadata.getPartitionRanges()).thenReturn(partitionRanges);
-
-    SegmentMetadataImpl meta = mock(SegmentMetadataImpl.class);
-    if (columnName != null) {
-      when(meta.getColumnMetadataFor(columnName)).thenReturn(columnMetadata);
-    }
-    when(meta.getTableName()).thenReturn(tableName);
-    when(meta.getName()).thenReturn(segmentName);
-    when(meta.getCrc()).thenReturn("0");
-    _pinotHelixResourceManager.addNewSegment(meta, "downloadUrl");
   }
 }

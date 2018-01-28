@@ -18,9 +18,11 @@ package com.linkedin.pinot.common.metadata.segment;
 import com.linkedin.pinot.common.metadata.ZKMetadata;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Set;
 import org.apache.helix.ZNRecord;
 
 /**
@@ -32,7 +34,7 @@ public class PartitionToReplicaGroupMappingZKMetadata implements ZKMetadata {
 
   private Map<String, List<String>> _partitionToReplicaGroupMapping;
   private String _tableName;
-  
+
   public PartitionToReplicaGroupMappingZKMetadata(ZNRecord znRecord) {
     _partitionToReplicaGroupMapping = znRecord.getListFields();
     _tableName = znRecord.getId();
@@ -78,6 +80,31 @@ public class PartitionToReplicaGroupMappingZKMetadata implements ZKMetadata {
       throw new NoSuchElementException();
     }
     return _partitionToReplicaGroupMapping.get(key);
+  }
+
+  /**
+   * Set instances of a replica group for a partition.
+   *
+   * @param partition Partition number
+   * @param replicaGroup Replica group number
+   * @param instances Instances that belongs to the gibn partition and replica group
+   */
+  public void setInstancesToReplicaGroup(int partition, int replicaGroup, List<String> instances) {
+    String key = createMappingKey(partition, replicaGroup);
+    _partitionToReplicaGroupMapping.put(key, instances);
+  }
+
+
+  /**
+   * Get all instances.
+   * @return Set of all instances for this table
+   */
+  public List<String> getAllInstances() {
+    Set<String> serverList = new HashSet<>();
+    for(List<String> servers: _partitionToReplicaGroupMapping.values()) {
+      serverList.addAll(servers);
+    }
+    return new ArrayList<>(serverList);
   }
 
   /**
